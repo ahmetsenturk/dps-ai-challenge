@@ -1,5 +1,4 @@
 from fastapi import FastAPI
-from pydantic import BaseModel
 import pandas as pd
 import pickle
 
@@ -8,13 +7,52 @@ model = pickle.load(open('models/model.pkl','rb'))
 le_monatszahl = pickle.load(open('encoders/le_monatszahl.pkl','rb'))
 le_auspraegung = pickle.load(open('encoders/le_auspraegung.pkl','rb'))
 
-app = FastAPI()
+# field mapping to handle different forms of input
+FIELD_MAPPING = {
+    'CATEGORY': 'MONATSZAHL',
+    'TYPE': 'AUSPRAEGUNG',
+    'YEAR': 'JAHR',
+    'MONTH': 'MONAT'
+}
 
-class PredictionInput(BaseModel):
-    MONATSZAHL: str
-    AUSPRAEGUNG: str
-    JAHR: int
-    MONAT: int
+# category dictionaries list to hadle missing input data
+CATEGORY_LIST = [
+    {
+        'MONATSZAHL': "Verkehrsunfälle",
+        'AUSPRAEGUNG': "insgesamt"
+    },
+    {
+        'MONATSZAHL': "Verkehrsunfälle",
+        'AUSPRAEGUNG': "Verletzte und Getötete"
+    },
+    {
+        'MONATSZAHL': "Verkehrsunfälle",
+        'AUSPRAEGUNG': "mit Personenschäden"
+    },
+    {
+        'MONATSZAHL': "Fluchtunfälle",
+        'AUSPRAEGUNG': "insgesamt"
+    },
+    {
+        'MONATSZAHL': "Fluchtunfälle",
+        'AUSPRAEGUNG': "insgesamt"
+    },
+    {
+        'MONATSZAHL': "Fluchtunfälle",
+        'AUSPRAEGUNG': "Verletzte und Getötete"
+    },
+    {
+        'MONATSZAHL': "Alkoholunfälle",
+        'AUSPRAEGUNG': "insgesamt"
+    },
+    {
+        'MONATSZAHL': "Alkoholunfälle",
+        'AUSPRAEGUNG': "Verletzte und Getötete"
+    }
+]
+
+
+app = FastAPI()
 
 # function to generalize calculating rolling features
 def calculate_lagging_features(df, group_cols, value_col, lags):
@@ -84,13 +122,60 @@ def prepare_new_instance(input):
     # return the new instance with the calculated features
     return new_instance_df.drop(['WERT', 'MONATSZAHL', 'AUSPRAEGUNG'], axis=1)
 
+# function to normalize input, to handle both german and english API requests
+def normalize_input(input_data):
+    normalized_data = {}
+    for key, value in input_data.items():
+        key_upper = key.upper()
+        if key_upper in FIELD_MAPPING:
+            new_key = FIELD_MAPPING[key_upper]
+            normalized_data[new_key] = value
+        else:
+            normalized_data[key_upper] = value
+    
+    # Ensure correct data types
+    if 'JAHR' in normalized_data:
+        normalized_data['JAHR'] = int(normalized_data['JAHR'])
+    if 'MONAT' in normalized_data:
+        normalized_data['MONAT'] = int(normalized_data['MONAT'])
+    
+    return normalized_data
 
+# if the input is missing the category and type columns, make predictions for all the relative month and year and return the sum
+def fill_missing_data(input_data):
+    data_list = []
+
+    for d in CATEGORY_LIST:
+        data_list.append({**input_data, **d})  
+
+    return data_list      
+        
 
 @app.post("/predict")
-def predict(input: PredictionInput):
-    new_instance = prepare_new_instance(input.dict())
+def predict(input: dict):
+    normalized_input = normalize_input(input)
+
+    if 'MONATSZAHL' not in normalized_input:
+        # then let's make multiple predictions for the relative date and sum them up
+        data_list = fill_missing_data(normalized_input)
+
+        prediction_total = 0
+
+        for data in data_list:
+            new_instance = prepare_new_instance(data)
     
-    # Predict the future value
-    prediction = model.predict(new_instance)
+            # predict the future value
+            prediction = model.predict(new_instance)
     
-    return {'prediction': prediction[0]}
+            prediction_total += prediction[0]
+
+        return {'prediction': prediction_total}
+
+    else:
+        # single prediction
+        new_instance = prepare_new_instance(normalized_input)
+    
+        # predict the future value
+        prediction = model.predict(new_instance)
+    
+        return {'prediction': prediction[0]}
